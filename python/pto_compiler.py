@@ -95,7 +95,11 @@ class PTOCompiler:
         """
         # For simulation platform, dispatch to compile_incore_sim
         if self.platform == "a2a3sim":
-            return self.compile_incore_sim(source_path)
+            return self.compile_incore_sim(
+                source_path,
+                pto_isa_root=pto_isa_root,
+                extra_include_dirs=extra_include_dirs
+            )
 
         # For real hardware (a2a3), continue with ccec compilation
         # Validate source file exists
@@ -322,15 +326,22 @@ class PTOCompiler:
         print(f"[Orchestration] Compilation successful: {len(binary_data)} bytes")
         return binary_data
 
-    def compile_incore_sim(self, source_path: str) -> bytes:
+    def compile_incore_sim(
+        self,
+        source_path: str,
+        pto_isa_root: Optional[str] = None,
+        extra_include_dirs: Optional[List[str]] = None
+    ) -> bytes:
         """
         Compile a simulation kernel to .o using g++.
 
-        This compiles a simulation kernel (plain C++ code) to an object file,
+        This compiles a simulation kernel (PTO ISA code with -D__CPU_SIM) to an object file,
         which can then have its .text section extracted for execution on host.
 
         Args:
             source_path: Path to kernel source file (.cpp)
+            pto_isa_root: Path to PTO-ISA root directory (for PTO ISA headers)
+            extra_include_dirs: Additional include directories
 
         Returns:
             Binary contents of the compiled .o file
@@ -347,14 +358,33 @@ class PTOCompiler:
         timestamp = int(time.time() * 1000)
         output_path = f"/tmp/sim_kernel_{timestamp}_{os.getpid()}.o"
 
-        # Build compilation command
+        # Build compilation command to create object file
+        # Use g++-15 due to pto-isa
         cmd = [
-            "g++", "-c",
+            "g++-15", "-c",                 # Compile to object file
             "-O2", "-fPIC", "-fno-plt",
-            "-std=c++17",
-            "-o", output_path,
-            source_path
+            "-std=c++23",
+            "-fpermissive",                 # Allow extensions
+            "-Wno-macro-redefined",         # Suppress macro redefinition warnings
+            "-Wno-ignored-attributes",      # Suppress attribute warnings
+            "-D__CPU_SIM",                  # CPU simulation mode
+            "-DPTO_CPU_TEXT_STANDALONE",    # No C++ stdlib symbols in .text
+            "-DNDEBUG",                     # Disable assert
+            "-fno-builtin",                 # Prevent loop-to-memset optimization
+            "-fno-toplevel-reorder",        # Keep entry function at .text+0x0
         ]
+
+        # Add PTO ISA header paths if provided
+        if pto_isa_root:
+            pto_include = os.path.join(pto_isa_root, "include")
+            cmd.append(f"-I{pto_include}")
+
+        # Add extra include directories if provided
+        if extra_include_dirs:
+            for inc_dir in extra_include_dirs:
+                cmd.append(f"-I{os.path.abspath(inc_dir)}")
+
+        cmd.extend(["-o", output_path, source_path])
 
         # Print compilation command
         print(f"\n{'='*80}")
