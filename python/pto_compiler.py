@@ -1,4 +1,5 @@
 import os
+import struct
 import subprocess
 import sys
 import time
@@ -225,6 +226,44 @@ class PTOCompiler:
 
         return cmd
 
+    def _patch_bl_instructions(self, binary_data: bytes) -> bytes:
+        """
+        Replace all bl (branch-and-link) instructions with infinite loop (b .).
+
+        For aarch64:
+        - bl instruction: 0x94xxxxxx (bits [31:26] = 0b100101)
+        - b . (infinite loop): 0x17ffffff (branch to self, offset=-1)
+
+        Args:
+            binary_data: Original compiled binary data
+
+        Returns:
+            Patched binary data with bl instructions replaced
+        """
+        # Convert to mutable bytearray
+        data = bytearray(binary_data)
+        patch_count = 0
+
+        # Scan through the binary in 4-byte (32-bit instruction) chunks
+        # We scan the entire file looking for bl instructions
+        for offset in range(0, len(data) - 3, 4):
+            # Read 32-bit instruction (little-endian)
+            insn = struct.unpack('<I', data[offset:offset+4])[0]
+
+            # Check if this is a bl instruction (bits [31:26] == 0b100101 = 0x25)
+            # bl encoding: 0x94000000 | (imm26 & 0x03FFFFFF)
+            if (insn & 0xFC000000) == 0x94000000:
+                # Replace with b . (infinite loop: branch to self)
+                # b . encoding: offset = -1 (in instructions), so imm26 = 0x3FFFFFF
+                # Full encoding: 0x14000000 | 0x3FFFFFF = 0x17FFFFFF
+                struct.pack_into('<I', data, offset, 0x17FFFFFF)
+                patch_count += 1
+
+        if patch_count > 0:
+            print(f"[SimKernel] Patched {patch_count} bl instruction(s) to infinite loops")
+
+        return bytes(data)
+
     def compile_orchestration(
         self,
         source_path: str,
@@ -440,4 +479,8 @@ class PTOCompiler:
             os.remove(order_file_path)
 
         print(f"[SimKernel] Compilation successful: {len(binary_data)} bytes")
+
+        # Post-process: Replace all bl/call instructions with infinite loops (b .)
+        binary_data = self._patch_bl_instructions(binary_data)
+
         return binary_data
